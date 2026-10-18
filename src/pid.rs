@@ -1,105 +1,177 @@
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy)]
 pub struct PidController {
-    pub kp: f32, pub ki: f32, pub kd: f32, pub dt: f32,
-
     pub setpoint: f32,
-    pub integral: f32,
-    pub previous_error: f32,
-
-    pub min: f32, pub max: f32,
-
-    pub d_filter_alpha: f32,
-    pub prev_derivative: f32,
+    kp: f32, 
+    ki: f32, 
+    kd: f32, 
+    dt: f32,
+    min: f32, 
+    max: f32,
+    d_filter_alpha: f32,
+    
+    integral: f32,
+    previous_error: f32,
+    prev_derivative: f32,
 }
 
 impl PidController {
-    pub fn new(kp: f32, ki: f32, kd: f32, dt: f32) -> Self {
-        let dt: f32 = if dt.abs() < 1e-6 { 0.01 } else { dt };
-
-        Self {
+    pub const fn new(kp: f32, ki: f32, kd: f32, dt: f32) -> Option<Self> {
+        if dt <= 0.0 || !dt.is_finite() {
+            return None;
+        }
+        
+        Some(Self {
             kp, ki, kd, dt,
-
             setpoint: 0.0,
+            d_filter_alpha: 1.0, // enabled by default
+            min: f32::MIN,
+            max: f32::MAX,
             integral: 0.0,
             previous_error: 0.0,
-
-            min: -1e9, max: 1e9,
-
-            d_filter_alpha: 1.0,
             prev_derivative: 0.0,
-        }
+        })
     }
 
+    pub fn set_limits(&mut self, min: f32, max: f32) -> Result<(), &'static str> {
+        if min > max || min.is_nan() || max.is_nan() {
+            return Err("Лимиты настроены некорректно или содержат NaN");
+        }
+        self.min = min;
+        self.max = max;
+        Ok(())
+    }
+
+    pub fn set_filter_alpha(&mut self, alpha: f32) {
+        self.d_filter_alpha = alpha.clamp(0.0, 1.0);
+    }
+
+    #[inline]
     pub fn update(&mut self, measurement: f32) -> f32 {
-        if self.dt.abs() < 1e-6 {
-            return 0.0;
+        if measurement.is_nan() {
+            return f32::NAN; 
         }
 
-        let error: f32 = self.setpoint - measurement;
+        let error = self.setpoint - measurement;
 
-        let p: f32 = self.kp * error;
+        let p = self.kp * error;
 
-        let raw_d: f32 = (error - self.previous_error) / self.dt;
-        let filtered_d: f32 = self.d_filter_alpha * raw_d + (1.0 - self.d_filter_alpha) * self.prev_derivative;
+        let raw_d = (error - self.previous_error) / self.dt;
+        let filtered_d = self.d_filter_alpha * raw_d + (1.0 - self.d_filter_alpha) * self.prev_derivative;
         self.prev_derivative = filtered_d;
-        let d: f32 = self.kd * filtered_d;
+        let d = self.kd * filtered_d;
 
-        let without_i: f32 = p + d;
+        let next_integral = self.integral + error * self.dt;
+        let i = next_integral * self.ki;
 
-        let (i_min, i_max) = if self.ki.abs() > 1e-6 {
-            let i_max = (self.max - without_i) / self.ki;
-            let i_min = (self.min - without_i) / self.ki;
-            if i_min < i_max {
-                (i_min, i_max)
-            } else {
-                (i_max, i_min)
-            }
-        } else {
-            (-1e6, 1e6)
-        };
+        let output = p + i + d;
 
-        self.integral += error * self.dt;
-        self.integral = self.integral.clamp(-1e6, 1e6);
-        self.integral = self.integral.clamp(i_min, i_max);
-
-        let i: f32 = self.ki * self.integral;
-        let output: f32 = without_i + i;
+        let is_saturated = (output > self.max && error > 0.0) || (output < self.min && error < 0.0);
+        
+        if !is_saturated {
+            self.integral = next_integral;
+        }
 
         self.previous_error = error;
 
         output.clamp(self.min, self.max)
     }
 
-    pub fn set_derivative_filter(&mut self, alpha: f32) {
-        self.d_filter_alpha = alpha.clamp(0.0, 1.0);
-    }
-
-    pub fn set_limits(&mut self, min: f32, max: f32) {
-        self.min = min;
-        self.max = max;
-    }
-
-    pub fn set_setpoint(&mut self, setpoint: f32) {
-        self.setpoint = setpoint;
-    }
-
-    pub fn set_gains(&mut self, kp: f32, ki: f32, kd: f32) {
-        self.kp = kp;
-        self.ki = ki;
-        self.kd = kd;
-    }
-
-    pub fn set_dt(&mut self, dt: f32) {
-        if dt.abs() < 1e-6 {
-            self.dt = 0.01;
-        } else {
-            self.dt = dt;
-        }
-    }
-
+    #[inline]
     pub fn reset(&mut self) {
         self.integral = 0.0;
         self.previous_error = 0.0;
         self.prev_derivative = 0.0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EPSILON: f32 = 1e-4;
+
+    fn assert_near(a: f32, b: f32) {
+        assert!((a - b).abs() < EPSILON, "Expected {}, got {}", b, a);
+    }
+
+    #[test]
+    fn test_new_valid_and_invalid() {
+        assert!(PidController::new(1.0, 1.0, 1.0, 0.01).is_some());
+        assert!(PidController::new(1.0, 1.0, 1.0, 0.0).is_none());
+        assert!(PidController::new(1.0, 1.0, 1.0, -0.01).is_none());
+        assert!(PidController::new(1.0, 1.0, 1.0, f32::NAN).is_none());
+    }
+
+    #[test]
+    fn test_set_limits() {
+        let mut pid = PidController::new(1.0, 0.0, 0.0, 1.0).unwrap();
+        assert!(pid.set_limits(-10.0, 10.0).is_ok());
+        assert!(pid.set_limits(10.0, -10.0).is_err());
+        assert!(pid.set_limits(f32::NAN, 10.0).is_err());
+    }
+
+    #[test]
+    fn test_proportional_only() {
+        let mut pid = PidController::new(2.0, 0.0, 0.0, 1.0).unwrap();
+        pid.setpoint = 10.0;
+        assert_near(pid.update(0.0), 20.0);
+        assert_near(pid.update(5.0), 10.0);
+    }
+
+    #[test]
+    fn test_integral_accumulation() {
+        let mut pid = PidController::new(0.0, 0.5, 0.0, 2.0).unwrap();
+        pid.setpoint = 10.0;
+        assert_near(pid.update(0.0), 10.0); 
+        assert_near(pid.update(0.0), 20.0); 
+    }
+
+    #[test]
+    fn test_derivative_action() {
+        let mut pid = PidController::new(0.0, 0.0, 1.0, 0.5).unwrap();
+        pid.setpoint = 10.0;
+        assert_near(pid.update(0.0), 20.0); 
+        assert_near(pid.update(2.0), -4.0); 
+    }
+
+    #[test]
+    fn test_derivative_with_filter() {
+        let mut pid = PidController::new(0.0, 0.0, 1.0, 1.0).unwrap();
+        pid.set_filter_alpha(0.5);
+        pid.setpoint = 10.0;
+        assert_near(pid.update(0.0), 5.0);
+    }
+
+    #[test]
+    fn test_anti_windup_clamping() {
+        let mut pid = PidController::new(0.0, 1.0, 0.0, 1.0).unwrap();
+        pid.set_limits(-5.0, 5.0).unwrap();
+        pid.setpoint = 10.0;
+        
+        assert_near(pid.update(0.0), 5.0);
+        assert_near(pid.update(0.0), 5.0);
+        
+        pid.setpoint = 0.0;
+        assert_near(pid.update(5.0), -5.0);
+    }
+
+
+    #[test]
+    fn test_reset() {
+        let mut pid = PidController::new(1.0, 1.0, 1.0, 1.0).unwrap();
+        pid.setpoint = 10.0;
+        pid.update(0.0);
+        pid.reset();
+        
+        assert_near(pid.integral, 0.0);
+        assert_near(pid.previous_error, 0.0);
+        assert_near(pid.prev_derivative, 0.0);
+    }
+
+    #[test]
+    fn test_nan_input_protection() {
+        let mut pid = PidController::new(1.0, 1.0, 1.0, 1.0).unwrap();
+        pid.setpoint = 10.0;
+        assert!(pid.update(f32::NAN).is_nan());
     }
 }
