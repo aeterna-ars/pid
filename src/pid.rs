@@ -34,7 +34,7 @@ impl PidController {
 
     pub fn set_limits(&mut self, min: f32, max: f32) -> Result<(), &'static str> {
         if min > max || min.is_nan() || max.is_nan() {
-            return Err("Лимиты настроены некорректно или содержат NaN");
+            return Err("NaN or incorrect");
         }
         self.min = min;
         self.max = max;
